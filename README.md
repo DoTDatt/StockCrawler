@@ -74,7 +74,7 @@ Output File (.xlsx)
 ### 1.Install dependencies
 
 ```bash
-go mod tidy
+go mod download
 go get github.com/xuri/excelize/v2
 ```
 ## 2.USAGE EXAMPLE
