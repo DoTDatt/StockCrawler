@@ -13,11 +13,10 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
-	"github.com/robfig/cron/v3"
 )
 
 const (
-	dsn        = "postgresql://postgres.kuopewvcftlvjltejfkt:Datdooiladatdo@aws-1-ap-northeast-1.pooler.supabase.com:6543/postgres"
+	dsn        = "postgresql://postgres.kuopewvcftlvjltejfkt:Datdooiladatdo@aws-1-ap-northeast-1.pooler.supabase.com:6543/postgres?sslmode=require"
 	apiURL     = "https://api.hsx.vn/l/api/v1/1/securities/stock"
 	pageSize   = 50
 	maxRetries = 3
@@ -190,13 +189,11 @@ func main() {
 	if err := db.Ping(); err != nil {
 		log.Fatal("DB không phản hồi:", err)
 	}
-	runCrawler()
-	c := cron.New()
-	c.AddFunc("@every 30s", func() {
-		runCrawler()
+	http.HandleFunc("/crawl", func(w http.ResponseWriter, r *http.Request) {
+		go runCrawler() // chạy background
+		w.Write([]byte("Crawler started"))
 	})
-	c.Start()
 
-	log.Println("--- Start ---")
-	select {}
+	log.Println("Server running on :8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
