@@ -12,12 +12,12 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/lib/pq"
 	"github.com/robfig/cron/v3"
 )
 
 const (
-	dsn        = "root:root@tcp(127.0.0.1:3306)/vtv_index_news_db2?charset=utf8mb4&parseTime=True&loc=Local"
+	dsn        = "postgresql://postgres.kuopewvcftlvjltejfkt:Datdooiladatdo@aws-1-ap-northeast-1.pooler.supabase.com:6543/postgres"
 	apiURL     = "https://api.hsx.vn/l/api/v1/1/securities/stock"
 	pageSize   = 50
 	maxRetries = 3
@@ -114,11 +114,6 @@ func upsertToDB(items []StockItem) error {
 
 	defer tx.Rollback()
 
-	var companyValues []string
-	var companyArray []any
-	var translationValues []string
-	var translationArgs []any
-
 	for _, item := range items {
 		if item.Brief == "" || item.Name == "" {
 			continue
@@ -128,11 +123,23 @@ func upsertToDB(items []StockItem) error {
 		if idno == "" {
 			idno = item.Brief
 		}
+
 		slug := strings.ToLower(strings.ReplaceAll(item.Name, " ", "-"))
 
-		companyValues = append(companyValues, "(?, ?, ?, ?, ?, ?, NULL, ?, 'HOSE', 'active', 'congtydaichung')")
+		var companyID int
 
-		companyArray = append(companyArray,
+		err = tx.QueryRow(`
+			INSERT INTO companies 
+			(id_no, short_name, address, telephone, fax, website, capital, exchange, status, type)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,'HOSE','active','congtydaichung')
+			ON CONFLICT (short_name, id_no)
+			DO UPDATE SET
+				address = EXCLUDED.address,
+				telephone = EXCLUDED.telephone,
+				capital = EXCLUDED.capital,
+				updated_at = CURRENT_TIMESTAMP
+			RETURNING company_id
+		`,
 			idno,
 			item.Brief,
 			item.Address,
@@ -140,35 +147,30 @@ func upsertToDB(items []StockItem) error {
 			item.Fax,
 			item.WebUrl,
 			item.Capital,
+		).Scan(&companyID)
+
+		if err != nil {
+			return err
+		}
+
+		_, err = tx.Exec(`
+			INSERT INTO company_translations
+			(company_id, lang_code, name, slug, description)
+			VALUES ($1,'vi',$2,$3,NULL)
+			ON CONFLICT (company_id, lang_code)
+			DO UPDATE SET
+				name = EXCLUDED.name,
+				slug = EXCLUDED.slug
+		`,
+			companyID,
+			item.Name,
+			slug,
 		)
 
-		translationValues = append(translationValues, "(?,'vi'?,?,null)")
-		translationArgs = append(translationArgs, idno, item.Name, slug)
-
+		if err != nil {
+			return err
+		}
 	}
-
-	companyUpsertQuery := `
-		INSERT INTO companies 
-		(id_no, short_name, address, telephone, fax, website, email, capital, exchange, status, type)
-		VALUES` + strings.Join(companyValues, ",") + `
-		ON DUPLICATE KEY UPDATE
-		address = VALUES(address),
-		telephone = VALUES(telephone),
-		capital = VALUES(capital),
-		updated_at = NOW()
-		`
-	tx.Exec(companyUpsertQuery, companyArray...)
-
-	companyTranslationsUpsertQuery := `
-		INSERT INTO company_translations
-		(company_id, lang_code, name, slug, description)
-		VALUES ` + strings.Join(translationValues, ",") + `
-		ON DUPLICATE KEY UPDATE
-		name = VALUES(name),
-		slug = VALUES(slug)	
-		`
-
-	tx.Exec(companyTranslationsUpsertQuery, translationArgs...)
 
 	return tx.Commit()
 }
@@ -179,7 +181,7 @@ func main() {
 
 	var err error
 
-	db, err = sql.Open("mysql", dsn)
+	db, err = sql.Open("postgres", dsn)
 	if err != nil {
 		log.Fatal("Lỗi kết nối DB:", err)
 	}
