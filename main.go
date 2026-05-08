@@ -11,9 +11,11 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/lib/pq"
+	"github.com/robfig/cron"
 )
 
 const (
@@ -50,56 +52,101 @@ type StockResponse struct {
 
 func fetchWithRetry(ctx context.Context, url string) (*StockResponse, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
+
 	for i := 0; i < maxRetries; i++ {
-		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-		req.Header.Set("User-Agent", "Mozilla/5.0")
-		resp, err := client.Do(req)
-		if err == nil && resp.StatusCode == 200 {
-			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
-			var data StockResponse
-			if err := json.Unmarshal(body, &data); err != nil {
-				return nil, err
-			}
-			return &data, nil
-		}
-		time.Sleep(5 * time.Second) //
-	}
-	return nil, fmt.Errorf("failed to fetch")
-}
 
-func runCrawler() {
-	log.Println(">>> Start crawling")
-	ctx := context.Background()
-
-	totalPages := 1
-	for page := 1; page <= totalPages; page++ {
-		u, _ := url.Parse(apiURL)
-		q := u.Query()
-		q.Set("pageIndex", fmt.Sprintf("%d", page))
-		q.Set("pageSize", fmt.Sprintf("%d", pageSize))
-		u.RawQuery = q.Encode()
-		finalUrl := u.String()
-		data, err := fetchWithRetry(ctx, finalUrl)
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
-			log.Printf("Lỗi fetch trang %d: %v", page, err)
+			return nil, err
+		}
+
+		req.Header.Set("User-Agent", "Mozilla/5.0")
+
+		resp, err := client.Do(req)
+		if err != nil {
+
+			time.Sleep(time.Duration(i+1) * time.Second)
 			continue
 		}
 
-		if page == 1 {
-			totalPages = data.Data.Paging.TotalPages
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return nil, fmt.Errorf("client error: %d", resp.StatusCode)
+		}
+
+		if resp.StatusCode >= 500 {
+			time.Sleep(time.Duration(i+1) * time.Second)
+			continue
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		resp.Body.Close()
+		var data StockResponse
+		if err := json.Unmarshal(body, &data); err != nil {
+			return nil, err
+		}
+
+		return &data, nil
+	}
+
+	return nil, fmt.Errorf("failed after retries")
+}
+
+func Worker(ctx context.Context, jobs <-chan int, wg *sync.WaitGroup) {
+
+	defer wg.Done()
+	for page := range jobs {
+		u, _ := url.Parse(apiURL)
+		q := u.Query()
+		q.Set("pageindex", fmt.Sprintf("%d", page))
+		q.Set("pagesize", fmt.Sprintf("%d", pageSize))
+		u.RawQuery = q.Encode()
+
+		data, err := fetchWithRetry(ctx, u.String())
+		if err != nil {
+			log.Printf("Page[%d] fetch error: %v", page, err)
+			continue
 		}
 
 		err = upsertToDB(data.Data.List)
 		if err != nil {
-			log.Printf("Lỗi Upsert trang %d: %v", page, err)
+			log.Printf("Page %d db error: %v", page, err)
 		} else {
-			log.Printf("Page %d/%d", page, totalPages)
+			log.Println("Success")
 		}
-
 		time.Sleep(delay)
+
 	}
-	log.Println(">>> End : total")
+}
+func Crawler() {
+	log.Println("Start crawling")
+	ctx := context.Background()
+
+	firstPage, err := fetchWithRetry(ctx, apiURL+"?PageIndex=1&pageSize=50")
+	if err != nil {
+		log.Println("Không thể lấy trang đầu", err)
+		return
+	}
+	totalPage := firstPage.Data.Paging.TotalPages
+
+	jobs := make(chan int, totalPage)
+	var wg sync.WaitGroup
+	numWorkers := 3
+
+	for i := 1; i <= numWorkers; i++ {
+		wg.Add(1)
+		go Worker(ctx, jobs, &wg)
+	}
+
+	for page := 1; page <= totalPage; page++ {
+		jobs <- page
+	}
+	close(jobs)
+
+	wg.Done()
+	log.Println("Finished all page")
 }
 
 func upsertToDB(items []StockItem) error {
@@ -187,13 +234,30 @@ func main() {
 	}
 	defer db.Close()
 
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(5 * time.Minute)
+
 	if err := db.Ping(); err != nil {
 		log.Fatal("DB không phản hồi:", err)
 	}
-	http.HandleFunc("/crawl", func(w http.ResponseWriter, r *http.Request) {
-		go runCrawler() // chạy background
-		w.Write([]byte("Crawler started"))
+	// http.HandleFunc("/crawl", func(w http.ResponseWriter, r *http.Request) {
+	// 	go func() {
+	// 		defer func() {
+	// 			if r := recover(); r != nil {
+	// 				log.Println("crawler panic recovered:", r)
+	// 			}
+	// 		}()
+	// 		Crawler()
+	// 	}()
+	// 	w.Write([]byte("Crawler started"))
+	// })
+
+	c := cron.New()
+	c.AddFunc("@every 30s", func() {
+		Crawler()
 	})
+	c.Start()
 
 	port := os.Getenv("PORT")
 	if port == "" {
