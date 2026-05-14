@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: crawler
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: crawler
+
+  template:
+    metadata:
+      labels:
+        app: crawler
+
+    spec:
+      containers:
+        - name: crawler
+
+          image: crawler
+
+          imagePullPolicy: Never
+
+          resources:
+          limits:
+            memory: "50Mi"
+
+          env:
+            - name: APP_ENV
+              value: production
+
+            - name: DB_HOST
+              value: mysql-crawler-service
+
+            - name: DB_PORT
+              value: "3306"
+
+            - name: DB_USER
+              value: root
+
+            - name: DB_PASSWORD
+              value: root
+
+            - name: DB_NAME
+              value: vtv_index_news_db2

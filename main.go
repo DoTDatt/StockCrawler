@@ -14,14 +14,13 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/lib/pq"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/robfig/cron"
 )
 
 const (
-	dsn        = "postgresql://postgres.kuopewvcftlvjltejfkt:Datdooiladatdo@aws-1-ap-northeast-1.pooler.supabase.com:6543/postgres?sslmode=require"
 	apiURL     = "https://api.hsx.vn/l/api/v1/1/securities/stock"
-	pageSize   = 50
+	pageSize   = 30
 	maxRetries = 3
 	delay      = 500 * time.Millisecond
 )
@@ -69,20 +68,47 @@ func fetchWithRetry(ctx context.Context, url string) (*StockResponse, error) {
 			continue
 		}
 
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			return nil, fmt.Errorf("client error: %d", resp.StatusCode)
-		}
+		switch {
 
-		if resp.StatusCode >= 500 {
+		case resp.StatusCode == http.StatusOK: //200
+			//go tự động break sau khi 1 case chạy xong
+		case resp.StatusCode == http.StatusBadRequest:
+			return nil, fmt.Errorf("400 bad request")
+
+		case resp.StatusCode == http.StatusUnauthorized:
+			return nil, fmt.Errorf("401 unauthorzied")
+
+		case resp.StatusCode == http.StatusNotFound:
+			return nil, fmt.Errorf("404 not found")
+
+		case resp.StatusCode == http.StatusRequestTimeout:
+			log.Println("408 request timeout")
+			resp.Body.Close()
+			time.Sleep(time.Second)
+			continue
+
+		case resp.StatusCode == http.StatusTooManyRequests:
+			log.Println("429 too many request")
+			resp.Body.Close()
+			time.Sleep(5 * time.Second)
+			continue
+
+		case resp.StatusCode >= 500:
+			log.Printf("Lỗi ở server (%d):Server đang quá tải", resp.StatusCode)
+			resp.Body.Close()
 			time.Sleep(time.Duration(i+1) * time.Second)
 			continue
+		default:
+			resp.Body.Close()
+			return nil, fmt.Errorf("mã lỗi không xác định %d", resp.StatusCode)
+
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("lỗi khi đọc body %w", err)
 		}
 
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, err
-		}
-		resp.Body.Close()
 		var data StockResponse
 		if err := json.Unmarshal(body, &data); err != nil {
 			return nil, err
@@ -145,7 +171,7 @@ func Crawler() {
 	}
 	close(jobs)
 
-	wg.Done()
+	wg.Wait()
 	log.Println("Finished all page")
 }
 
@@ -158,7 +184,6 @@ func upsertToDB(items []StockItem) error {
 	if err != nil {
 		return err
 	}
-
 	defer tx.Rollback()
 
 	for _, item := range items {
@@ -173,47 +198,35 @@ func upsertToDB(items []StockItem) error {
 
 		slug := strings.ToLower(strings.ReplaceAll(item.Name, " ", "-"))
 
-		var companyID int
-
-		err = tx.QueryRow(`
-			INSERT INTO companies 
-			(id_no, short_name, address, telephone, fax, website, capital, exchange, status, type)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,'HOSE','active','congtydaichung')
-			ON CONFLICT (short_name, id_no)
-			DO UPDATE SET
-				address = EXCLUDED.address,
-				telephone = EXCLUDED.telephone,
-				capital = EXCLUDED.capital,
-				updated_at = CURRENT_TIMESTAMP
-			RETURNING company_id
-		`,
-			idno,
-			item.Brief,
-			item.Address,
-			item.Phone,
-			item.Fax,
-			item.WebUrl,
-			item.Capital,
-		).Scan(&companyID)
-
+		companyQuery := `
+            INSERT INTO companies 
+            (id_no, short_name, address, telephone, fax, website, capital, exchange, status, type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'HOSE', 'active', 'congtydaichung')
+            ON DUPLICATE KEY UPDATE
+                address = VALUES(address),
+                telephone = VALUES(telephone),
+                capital = VALUES(capital),
+                updated_at = NOW()
+        `
+		_, err = tx.Exec(companyQuery,
+			idno, item.Brief, item.Address, item.Phone,
+			item.Fax, item.WebUrl, item.Capital,
+		)
 		if err != nil {
 			return err
 		}
 
-		_, err = tx.Exec(`
-			INSERT INTO company_translations
-			(company_id, lang_code, name, slug, description)
-			VALUES ($1,'vi',$2,$3,NULL)
-			ON CONFLICT (company_id, lang_code)
-			DO UPDATE SET
-				name = EXCLUDED.name,
-				slug = EXCLUDED.slug
-		`,
-			companyID,
-			item.Name,
-			slug,
-		)
+		translationQuery := `
+            INSERT INTO company_translations (company_id, lang_code, name, slug, description)
+            SELECT company_id, 'vi', ?, ?, NULL 
+            FROM companies 
+            WHERE id_no = ? AND short_name = ?
+            ON DUPLICATE KEY UPDATE
+                name = VALUES(name),
+                slug = VALUES(slug)
+        `
 
+		_, err = tx.Exec(translationQuery, item.Name, slug, idno, item.Brief)
 		if err != nil {
 			return err
 		}
@@ -228,42 +241,33 @@ func main() {
 
 	var err error
 
-	db, err = sql.Open("postgres", dsn)
+	dsn := fmt.Sprintf(
+		"%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
+		os.Getenv("DB_USER"),
+		os.Getenv("DB_PASSWORD"),
+		os.Getenv("DB_HOST"),
+		os.Getenv("DB_PORT"),
+		os.Getenv("DB_NAME"),
+	)
+
+	db, err = sql.Open("mysql", dsn)
 	if err != nil {
 		log.Fatal("Lỗi kết nối DB:", err)
 	}
+
 	defer db.Close()
 
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(10)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
-	if err := db.Ping(); err != nil {
-		log.Fatal("DB không phản hồi:", err)
-	}
-	// http.HandleFunc("/crawl", func(w http.ResponseWriter, r *http.Request) {
-	// 	go func() {
-	// 		defer func() {
-	// 			if r := recover(); r != nil {
-	// 				log.Println("crawler panic recovered:", r)
-	// 			}
-	// 		}()
-	// 		Crawler()
-	// 	}()
-	// 	w.Write([]byte("Crawler started"))
-	// })
-
 	c := cron.New()
-	c.AddFunc("@every 30s", func() {
+	Crawler()
+	c.AddFunc("60000s", func() {
 		Crawler()
 	})
 	c.Start()
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	log.Println("Server running on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Println("Crawler")
+	select {}
 }

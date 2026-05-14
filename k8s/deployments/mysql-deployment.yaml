@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: crawler-mysql
+
+spec:
+  replicas: 1
+  selector: 
+    matchLabels:
+     app: crawler-mysql
+
+  template:
+    metadata:
+      labels:
+        app: crawler-mysql
+
+    spec: 
+      containers:
+        - name: crawler-mysql
+
+          image: mysql:8.0
+          ports:
+          - containerPort: 3306
+
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              value: root
+
+            - name: MYSQL_DATABASE
+              value: vtv_index_news_db2
+
+          volumeMounts:
+            - name: crawler-mysql-storage
+              mountPath: /var/lib/mysql
+
+      volumes:
+        - name: crawler-mysql-storage
+
+          persistentVolumeClaim:
+            claimName: crawler-mysql-pvc
+

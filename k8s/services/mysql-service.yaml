@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: mysql-crawler-service
+
+spec:
+  selector:
+    app: crawler-mysql
+
+  ports:
+  - port: 3306
+    targetPort: 3306

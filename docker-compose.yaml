@@ -1,0 +1,23 @@
+services:
+  db:
+    image: mysql:8.0
+    container_name: mysql_db
+    restart: always
+    environment:
+      MYSQL_DATABASE: vtv_index_news_db2
+      MYSQL_ROOT_PASSWORD: root  
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  crawler:
+    build: .
+    container_name: go_app
+    restart: always
+    depends_on:
+      - db
+
+volumes:
+  mysql_data:
+
